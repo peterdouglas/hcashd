@@ -1783,6 +1783,18 @@ func (b *BlockChain) connectBlock(node *blockNode, block *hcashutil.Block, view 
 	b.stateSnapshot = state
 	b.stateLock.Unlock()
 
+
+
+	// Assemble the current block and the parent into a slice.
+	blockAndParent := []*hcashutil.Block{block, parent}
+
+	// Notify the caller that the block was connected to the main chain.
+	// The caller would typically want to react with actions such as
+	// updating wallets.
+	b.chainLock.Unlock()
+	b.sendNotification(NTBlockConnected, blockAndParent)
+	b.chainLock.Lock()
+
 	// Send stake notifications about the new block.
 	if node.keyHeight >= b.chainParams.StakeEnabledHeight {
 		nextStakeDiff, err := b.calcNextRequiredStakeDifficulty(node)
@@ -1813,15 +1825,7 @@ func (b *BlockChain) connectBlock(node *blockNode, block *hcashutil.Block, view 
 			})
 	}
 
-	// Assemble the current block and the parent into a slice.
-	blockAndParent := []*hcashutil.Block{block, parent}
 
-	// Notify the caller that the block was connected to the main chain.
-	// The caller would typically want to react with actions such as
-	// updating wallets.
-	b.chainLock.Unlock()
-	b.sendNotification(NTBlockConnected, blockAndParent)
-	b.chainLock.Lock()
 
 	// Optimization: Before checkpoints, immediately dump the parent's stake
 	// node because we no longer need it.
@@ -2440,7 +2444,10 @@ func (b *BlockChain) connectBestChain(node *blockNode, block *hcashutil.Block, f
 		view.SetStakeViewpoint(ViewpointPrevRegular)
 		var stxos []spentTxOut
 		if !fastAdd {
-			err := b.checkConnectBlock(node, block, view, &stxos, false, nil)
+			keyHeightCache := make(map[int64]int64)
+			keyHeightCache[block.Height()] = int64(block.MsgBlock().Header.KeyHeight)
+
+			err := b.checkConnectBlock(node, block, view, &stxos, false, keyHeightCache)
 			if err != nil {
 				return false, err
 			}

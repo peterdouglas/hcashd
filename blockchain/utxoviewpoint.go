@@ -965,6 +965,11 @@ func (view *UtxoViewpoint) fetchInputUtxos(db database.DB,
 	// current chain without the TxTreeRegular of the previous block
 	// added so we can validate that.
 	if viewpoint == ViewpointPrevRegular {
+		offset := 1
+		if HashToBig(parent.Hash()).Cmp(CompactToBig(parent.MsgBlock().Header.Bits)) <= 0{
+			offset = 2
+		}
+
 		transactions := parent.Transactions()
 		for i, tx := range transactions {
 			txInFlight[*tx.Hash()] = i
@@ -973,7 +978,7 @@ func (view *UtxoViewpoint) fetchInputUtxos(db database.DB,
 		// Loop through all of the transaction inputs (except for the coinbase
 		// which has no inputs) collecting them into sets of what is needed and
 		// what is already known (in-flight).
-		for i, tx := range transactions[1:] {
+		for i, tx := range transactions[offset:] {
 			for _, txIn := range tx.MsgTx().TxIn {
 				// It is acceptable for a transaction input to reference
 				// the output of another transaction in this block only
@@ -988,10 +993,10 @@ func (view *UtxoViewpoint) fetchInputUtxos(db database.DB,
 				// the block due to skipping the coinbase.
 				originHash := &txIn.PreviousOutPoint.Hash
 				if inFlightIndex, ok := txInFlight[*originHash]; ok &&
-					i >= inFlightIndex {
+					i + offset > inFlightIndex {
 
 					originTx := transactions[inFlightIndex]
-					view.AddTxOuts(originTx, block.Height(), uint32(i))
+					view.AddTxOuts(originTx, parent.Height(), uint32(inFlightIndex))
 					continue
 				}
 
@@ -1063,12 +1068,15 @@ func (view *UtxoViewpoint) fetchInputUtxos(db database.DB,
 		for i, tx := range transactions {
 			txInFlight[*tx.Hash()] = i
 		}
-
+		offset := 1
+		if HashToBig(block.Hash()).Cmp(CompactToBig(block.MsgBlock().Header.Bits)) <= 0{
+			offset = 2
+		}
 		// Loop through all of the transaction inputs (except for the coinbase
 		// which has no inputs) collecting them into sets of what is needed and
 		// what is already known (in-flight).
 		txNeededSet := make(map[chainhash.Hash]struct{})
-		for i, tx := range transactions[1:] {
+		for i, tx := range transactions[offset:] {
 			for _, txIn := range tx.MsgTx().TxIn {
 				// It is acceptable for a transaction input to reference
 				// the output of another transaction in this block only
@@ -1083,10 +1091,10 @@ func (view *UtxoViewpoint) fetchInputUtxos(db database.DB,
 				// the block due to skipping the coinbase.
 				originHash := &txIn.PreviousOutPoint.Hash
 				if inFlightIndex, ok := txInFlight[*originHash]; ok &&
-					i >= inFlightIndex {
+					i + offset > inFlightIndex {
 
 					originTx := transactions[inFlightIndex]
-					view.AddTxOuts(originTx, block.Height(), uint32(i))
+					view.AddTxOuts(originTx, block.Height(), uint32(inFlightIndex))
 					continue
 				}
 
@@ -1174,6 +1182,131 @@ func (b *BlockChain) FetchUtxoView(tx *hcashutil.Tx, treeValid bool) (*UtxoViewp
 
 	return view, err
 }
+
+
+func (b *BlockChain) FetchCurrentUtxoView(treeValid bool) (*UtxoViewpoint,
+	error) {
+	b.chainLock.RLock()
+	defer b.chainLock.RUnlock()
+
+	// Request the utxos from the point of view of the end of the main
+	// chain.
+	view := NewUtxoViewpoint()
+	if treeValid {
+		view.SetStakeViewpoint(ViewpointCurrentRegular)
+		block, err := b.fetchBlockFromHash(&b.bestNode.hash)
+		if err != nil {
+			return nil, err
+		}
+		parent, err := b.fetchBlockFromHash(&b.bestNode.header.PrevBlock)
+		if err != nil {
+			return nil, err
+		}
+		err = view.fetchInputUtxos(b.db, block, parent)
+		if err != nil {
+			return nil, err
+		}
+		for i, blockTx := range block.Transactions() {
+			err := view.connectTransaction(blockTx, b.bestNode.height,
+				uint32(i), nil)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	view.SetBestHash(&b.bestNode.hash)
+
+
+
+	return view, nil
+}
+
+func (b *BlockChain) AddTxToUtxoView(view *UtxoViewpoint, tx *hcashutil.Tx) (*UtxoViewpoint, bool,
+	error) {
+	b.chainLock.RLock()
+	defer b.chainLock.RUnlock()
+
+	if b.bestNode.hash != *(view.BestHash()) {
+		return view, true, nil
+	}
+
+	// Request the utxos from the point of view of the end of the main
+	// chain.
+	txNeededSet := make(map[chainhash.Hash]struct{})
+	txNeededSet[*tx.Hash()] = struct{}{}
+	msgTx := tx.MsgTx()
+	isSSGen, _ := stake.IsSSGen(msgTx)
+	if !IsCoinBaseTx(msgTx) {
+		for i, txIn := range msgTx.TxIn {
+			if isSSGen && i == 0 {
+				continue
+			}
+			txNeededSet[txIn.PreviousOutPoint.Hash] = struct{}{}
+		}
+	}
+
+	err := view.fetchUtxosMain(b.db, txNeededSet)
+
+	return view, false, err
+}
+
+func DeepCopyUtxoViewpoint(utxoViewpoint *UtxoViewpoint) *UtxoViewpoint{
+	if utxoViewpoint == nil{
+		return nil
+	}
+	entries := utxoViewpoint.entries
+	entriesCopy := make(map[chainhash.Hash]*UtxoEntry)
+	for hash, entry := range entries{
+		if entry == nil{
+			entriesCopy[hash] = nil
+			continue
+		}
+		sparseOutputs := entry.sparseOutputs
+		sparseOutputsCopy := make(map[uint32]*utxoOutput)
+		for index, output := range sparseOutputs{
+			if output == nil{
+				sparseOutputsCopy[index] = nil
+				continue
+			}
+
+			outputCopy := &utxoOutput{
+				pkScript: make([]byte, len(output.pkScript)),
+				amount: output.amount,
+				scriptVersion: output.scriptVersion,
+				compressed : output.compressed,
+				spent: output.spent,
+			}
+			for i, pkScriptByte := range output.pkScript{
+				outputCopy.pkScript[i] = pkScriptByte
+			}
+			sparseOutputsCopy[index] = outputCopy
+		}
+		entryCopy := &UtxoEntry{
+			sparseOutputs: sparseOutputsCopy,
+			stakeExtra: make([]byte, len(entry.stakeExtra)),
+			txVersion: entry.txVersion,
+			height: entry.height,
+			index: entry.index,
+			txType: entry.txType,
+			isCoinBase: entry.isCoinBase,
+			hasExpiry: entry.hasExpiry,
+			modified: entry.modified,
+		}
+		for i, stakeExtraByte := range entry.stakeExtra{
+			entryCopy.stakeExtra[i] = stakeExtraByte
+		}
+		entriesCopy[hash] = entryCopy
+	}
+
+	return &UtxoViewpoint{
+		entries: entriesCopy,
+		bestHash: utxoViewpoint.bestHash,
+		stakeView: utxoViewpoint.stakeView,
+	}
+}
+
+
+
 
 // FetchUtxoEntry loads and returns the unspent transaction output entry for the
 // passed hash from the point of view of the end of the main chain.

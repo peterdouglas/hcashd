@@ -1889,6 +1889,7 @@ func handleGetBestBlock(s *rpcServer, cmd interface{}, closeChan <-chan struct{}
 	result := &hcashjson.GetBestBlockResult{
 		Hash:   best.Hash.String(),
 		Height: best.Height,
+		KeyHeight: best.KeyHeight,
 	}
 	return result, nil
 }
@@ -2764,10 +2765,10 @@ func (state *gbtWorkState) blockTemplateResult(bm *blockManager, useCoinbaseValu
 
 			fee, _, _, err = blockchain.CheckTransactionInputs(bm.chain,
 				bm.chain.FetchSubsidyCache(),
-				txU,
+				txU, int64(template.Block.Header.Height),
 				int64(template.Block.Header.KeyHeight),
 				view,
-				true, // Ensure fraud proofs are correct
+				blockchain.FraudProofKeyBlockCheck, // Ensure fraud proofs are correct
 				bm.server.chainParams,
 					nil)
 			if err != nil {
@@ -2883,10 +2884,10 @@ func (state *gbtWorkState) blockTemplateResult(bm *blockManager, useCoinbaseValu
 
 			fee, _, _, err = blockchain.CheckTransactionInputs(bm.chain,
 				bm.chain.FetchSubsidyCache(),
-				txU,
+				txU, int64(template.Block.Header.Height),
 				int64(template.Block.Header.KeyHeight),
 				view,
-				true, // Ensure fraud proofs are correct
+				blockchain.FraudProofKeyBlockCheck, // Ensure fraud proofs are correct
 				bm.server.chainParams,
 					nil)
 			if err != nil {

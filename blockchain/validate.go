@@ -50,6 +50,12 @@ const (
 	// earlyVoteBitsValue is the only value of VoteBits allowed in a block
 	// header before stake validation height.
 	earlyVoteBitsValue = 0x0001
+
+	FraudProofNoCheck = 0
+
+	FraudProofKeyBlockCheck = 1
+
+	FraudProofMicroBlockCheck = 2
 )
 
 var (
@@ -1318,8 +1324,8 @@ func (b *BlockChain) CheckBlockStakeSanity(stakeValidationHeight int64, node *bl
 // NOTE: The transaction MUST have already been sanity checked with the
 // CheckTransactionSanity function prior to calling this function.
 
-func CheckTransactionInputs(chain *BlockChain, subsidyCache *SubsidyCache, tx *hcashutil.Tx, txKeyHeight int64, utxoView *UtxoViewpoint,
-	checkFraudProof bool, chainParams *chaincfg.Params, keyHeightCache map[int64]int64) (int64, int64, int64, error) {
+func CheckTransactionInputs(chain *BlockChain, subsidyCache *SubsidyCache, tx *hcashutil.Tx, txHeight int64, txKeyHeight int64, utxoView *UtxoViewpoint,
+	checkFraudProofFlag uint32, chainParams *chaincfg.Params, keyHeightCache map[int64]int64) (int64, int64, int64, error) {
 
 	msgTx := tx.MsgTx()
 
@@ -1756,7 +1762,7 @@ func CheckTransactionInputs(chain *BlockChain, subsidyCache *SubsidyCache, tx *h
 			return 0, 0, 0, ruleError(ErrZeroValueOutputSpend, str)
 		}
 
-		if checkFraudProof {
+		if checkFraudProofFlag != FraudProofNoCheck {
 			if txIn.ValueIn !=
 				utxoEntry.AmountByIndex(originTxIndex) {
 				str := fmt.Sprintf("bad fraud check value in "+
@@ -1773,13 +1779,22 @@ func CheckTransactionInputs(chain *BlockChain, subsidyCache *SubsidyCache, tx *h
 					txIn.BlockHeight, idx)
 				return 0, 0, 0, ruleError(ErrFraudBlockHeight, str)
 			}
-
-			if txIn.BlockIndex != utxoEntry.BlockIndex() {
-				str := fmt.Sprintf("bad fraud check block "+
-					"index (expected %v, given %v) for "+
-					"txIn %v", utxoEntry.BlockIndex(),
-					txIn.BlockIndex, idx)
-				return 0, 0, 0, ruleError(ErrFraudBlockIndex, str)
+			if checkFraudProofFlag == FraudProofKeyBlockCheck || txIn.BlockHeight != uint32(txHeight){
+				if txIn.BlockIndex != utxoEntry.BlockIndex() {
+					str := fmt.Sprintf("bad fraud check block "+
+						"index (expected %v, given %v) for "+
+						"txIn %v", utxoEntry.BlockIndex(),
+						txIn.BlockIndex, idx)
+					return 0, 0, 0, ruleError(ErrFraudBlockIndex, str)
+				}
+			} else{
+				if txIn.BlockIndex != utxoEntry.BlockIndex() + 1 {
+					str := fmt.Sprintf("bad fraud check block "+
+						"index (expected %v, given %v) for "+
+						"txIn %v", utxoEntry.BlockIndex(),
+						txIn.BlockIndex, idx)
+					return 0, 0, 0, ruleError(ErrFraudBlockIndex, str)
+				}
 			}
 		}
 
@@ -2348,9 +2363,13 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 
 		// This step modifies the txStore and marks the tx outs used
 		// spent, so be aware of this.
+		FraudProofCheckFlag := FraudProofMicroBlockCheck
+		if node.isKeyBlock || isMining{
+			FraudProofCheckFlag = FraudProofKeyBlockCheck
+		}
 
-		_, txFee, _, err := CheckTransactionInputs(b, b.subsidyCache, tx,
-			node.keyHeight, utxoView, true, /* check fraud proofs */
+		_, txFee, _, err := CheckTransactionInputs(b, b.subsidyCache, tx, node.height,
+			node.keyHeight, utxoView, uint32(FraudProofCheckFlag), /* check fraud proofs */
 			b.chainParams, keyHeightCache)
 		if err != nil {
 			log.Tracef("CheckTransactionInputs failed; error "+
@@ -2777,6 +2796,9 @@ func (b *BlockChain) CheckConnectBlock(block *hcashutil.Block, isMining bool) er
 		return ruleError(ErrMissingParent, err.Error())
 	}
 
+	keyHeightCache := make(map[int64]int64)
+	keyHeightCache[block.Height()] = int64(block.MsgBlock().Header.KeyHeight)
+
 	newNode := newBlockNode(block,
 		ticketsSpentInBlock(block),
 		ticketsRevokedInBlock(block),
@@ -2795,7 +2817,7 @@ func (b *BlockChain) CheckConnectBlock(block *hcashutil.Block, isMining bool) er
 		prevNode.hash == b.bestNode.hash) {
 		view := NewUtxoViewpoint()
 		view.SetBestHash(&prevNode.hash)
-		return b.checkConnectBlock(newNode, block, view, nil, isMining, nil)
+		return b.checkConnectBlock(newNode, block, view, nil, isMining, keyHeightCache)
 	}
 
 	// The requested node is either on a side chain or is a node on the
@@ -2849,7 +2871,7 @@ func (b *BlockChain) CheckConnectBlock(block *hcashutil.Block, isMining bool) er
 	// if there are no nodes to attach, we're done.
 	if attachNodes.Len() == 0 {
 		view.SetBestHash(&parentHash)
-		return b.checkConnectBlock(newNode, block, view, nil, isMining, nil)
+		return b.checkConnectBlock(newNode, block, view, nil, isMining, keyHeightCache)
 	}
 
 	// The requested node is on a side chain, so we need to apply the
@@ -2875,5 +2897,5 @@ func (b *BlockChain) CheckConnectBlock(block *hcashutil.Block, isMining bool) er
 	}
 
 	view.SetBestHash(&parentHash)
-	return b.checkConnectBlock(newNode, block, view, &stxos, isMining, nil)
+	return b.checkConnectBlock(newNode, block, view, &stxos, isMining, keyHeightCache)
 }
